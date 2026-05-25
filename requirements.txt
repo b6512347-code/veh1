@@ -5,6 +5,5 @@ requests
 folium
 streamlit-folium
 networkx
-osmnx
 matplotlib
 openpyxl
