@@ -12,10 +12,9 @@ import os
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 
-# 🌿 นำเข้าไลบรารีสำหรับการประมวลผล GIS ขั้นสูง
+# 🌿 นำเข้าไลบรารีสำหรับประมวลผลไฟล์ .osm
 import networkx as nx
-import geopandas as gpd
-from shapely.geometry import Point, LineString
+import osmnx as ox
 
 # =====================================================================
 # 🛠️ 1. การตั้งค่าทรัพยากรและฟอนต์
@@ -33,7 +32,7 @@ def setup_thai_font():
 setup_thai_font()
 
 # =====================================================================
-# ⚙️ 2. ฐานข้อมูลตั้งต้น
+# ⚙️ 2. ฐานข้อมูลตั้งต้นสำหรับทดสอบ (SUT Default Data)
 # =====================================================================
 DEFAULT_DATA = [
     ("Depot โรงจัดการขยะ", 14.862939, 102.027903, 0.0),
@@ -48,7 +47,7 @@ DEFAULT_DATA = [
 ]
 
 # =====================================================================
-# 🧮 3. ฟังก์ชันคณิตศาสตร์ (Haversine) และ QGIS NetworkX
+# 🧮 3. โมดูลประมวลผลไฟล์ .OSM (Local Offline Routing)
 # =====================================================================
 def haversine_dist(lon1, lat1, lon2, lat2):
     R = 6371.0
@@ -58,63 +57,43 @@ def haversine_dist(lon1, lat1, lon2, lat2):
     return R * (2 * math.asin(math.sqrt(a)))
 
 @st.cache_data
-def build_qgis_graph(geojson_path):
-    G = nx.Graph()
+def build_osm_graph(osm_file_path):
+    """ใช้ OSMnx อ่านไฟล์ .osm แล้วแปลงเป็น Mathematical Graph"""
     try:
-        gdf = gpd.read_file(geojson_path)
-        
-        # ⚠️ แก้ปัญหาที่ 1: บังคับแปลงพิกัด (CRS) ให้เป็น Lat/Lon (EPSG:4326) เสมอ
-        if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
-            gdf = gdf.to_crs(epsg=4326)
-            
-        for _, row in gdf.iterrows():
-            geom = row.geometry
-            if geom and geom.geom_type in ['LineString', 'MultiLineString']:
-                lines = [geom] if geom.geom_type == 'LineString' else geom.geoms
-                for line in lines:
-                    coords = list(line.coords)
-                    for i in range(len(coords)-1):
-                        p1, p2 = coords[i], coords[i+1]
-                        dist = haversine_dist(p1[0], p1[1], p2[0], p2[1])
-                        G.add_edge(p1, p2, weight=dist)
+        # โหลดไฟล์ .osm สร้างเป็นโครงข่ายทิศทาง (MultiDiGraph)
+        G = ox.graph_from_xml(osm_file_path, simplify=True)
         return G
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านกราฟ QGIS: {e}")
+        st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ .osm: {e}")
         return None
 
-def get_nearest_node(G, point):
-    nearest_node = None
-    min_dist = float('inf')
-    if G is None or len(G.nodes) == 0:
-        return point, 0
-    for node in G.nodes:
-        dist = haversine_dist(point[0], point[1], node[0], node[1])
-        if dist < min_dist:
-            min_dist = dist
-            nearest_node = node
-    return nearest_node, min_dist
-
-def get_distance_matrix_qgis(G, locations):
+def get_distance_matrix_osm(G, locations):
+    """สร้าง Distance Matrix จากโครงข่าย Graph ของไฟล์ .osm"""
     N = len(locations)
     distance_matrix = np.zeros((N, N))
-    raw_coords = [(item[2], item[1]) for item in locations]
-    snapped_nodes = [get_nearest_node(G, pt)[0] for pt in raw_coords]
+    
+    # ดึงพิกัดเพื่อทำ Snapping เข้าหาจุดถนน (Nodes) ที่ใกล้ที่สุด
+    lons = [item[2] for item in locations]
+    lats = [item[1] for item in locations]
+    
+    # OSMnx ฟังก์ชันดึงพิกัดเข้าถนนอย่างรวดเร็ว
+    snapped_nodes = ox.distance.nearest_nodes(G, lons, lats)
     
     for i in range(N):
         for j in range(N):
             if i != j:
                 try:
-                    if G is not None:
-                        dist = nx.shortest_path_length(G, source=snapped_nodes[i], target=snapped_nodes[j], weight='weight')
-                    else:
-                        dist = haversine_dist(raw_coords[i][0], raw_coords[i][1], raw_coords[j][0], raw_coords[j][1])
-                    distance_matrix[i][j] = dist
+                    # คำนวณระยะทางที่สั้นที่สุด (weight='length' คือระยะทางจริงบนถนนหน่วยเป็นเมตร)
+                    dist_meters = nx.shortest_path_length(G, source=snapped_nodes[i], target=snapped_nodes[j], weight='length')
+                    distance_matrix[i][j] = dist_meters / 1000.0 # แปลงเป็นกิโลเมตร
                 except nx.NetworkXNoPath:
-                    distance_matrix[i][j] = haversine_dist(raw_coords[i][0], raw_coords[i][1], raw_coords[j][0], raw_coords[j][1])
+                    # ถ้าเส้นทางขาด ให้ใช้ระยะกระจัด (Haversine) ทดแทน
+                    distance_matrix[i][j] = haversine_dist(lons[i], lats[i], lons[j], lats[j])
+                    
     return pd.DataFrame(distance_matrix)
 
 # =====================================================================
-# 📡 4. การเชื่อมต่อโครงข่ายถนนสาธารณะ (OSRM API)
+# 📡 4. โมดูลเชื่อมต่อ OSRM API (ออนไลน์)
 # =====================================================================
 @st.cache_data(show_spinner=False)
 def get_distance_matrix_osrm(locations):
@@ -134,11 +113,11 @@ def get_distance_matrix_osrm(locations):
             
             url = f"http://router.project-osrm.org/table/v1/driving/{coords_string}?sources={sources_str}&destinations={destinations_str}&annotations=distance"
             try:
-                response = requests.get(url)
+                response = requests.get(url, timeout=10)
                 data = response.json()
                 if data.get("code") == "Ok":
                     distance_matrix[i:i+len(src_chunk), j:j+len(dst_chunk)] = np.array(data["distances"])
-            except Exception:
+            except:
                 pass
             time.sleep(0.5)
     return pd.DataFrame(distance_matrix) / 1000.0
@@ -206,147 +185,74 @@ def run_sweep_algorithm(locations, demands, nodes, max_capacity):
 # =====================================================================
 # 🗺️ 6. โมดูลสร้างแผนที่ Interactive (Folium)
 # =====================================================================
-def create_interactive_map(routes, locations, nodes, routing_mode, G_qgis=None, qgis_file_path=None):
+def create_interactive_map(routes, locations, nodes, routing_mode, G_osm=None):
     depot_coords = (locations[0][1], locations[0][2])
-    m = folium.Map(location=depot_coords, zoom_start=16, tiles='CartoDB positron')
-    
-    # วาดเส้นถนน QGIS
-    if routing_mode == "QGIS Custom Map (ออฟไลน์)" and qgis_file_path is not None and os.path.exists(qgis_file_path):
-        try:
-            gdf_bg = gpd.read_file(qgis_file_path)
-            if gdf_bg.crs is None: gdf_bg.set_crs(epsg=4326, inplace=True)
-            elif gdf_bg.crs.to_epsg() != 4326: gdf_bg = gdf_bg.to_crs(epsg=4326)
-            
-            # --- แก้ไข: เพิ่มการหา Bounds และซูมไปที่ถนน ---
-            bounds = gdf_bg.total_bounds # [minx, miny, maxx, maxy]
-            m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
-            
-            folium.GeoJson(
-                gdf_bg.to_json(),
-                name="โครงข่ายถนน QGIS",
-                style_function=lambda x: {'color': '#000000', 'weight': 3, 'opacity': 0.7}
-            ).add_to(m)
-            st.sidebar.success("✅ วาดถนน QGIS สำเร็จ")
-        except Exception as e:
-            st.sidebar.error(f"❌ อ่านไฟล์ QGIS ไม่ได้: {e}")
+    m = folium.Map(location=depot_coords, zoom_start=15, tiles='CartoDB positron')
+    colors = ['#FF5733', '#335BFF', '#28B463', '#9B59B6', '#E67E22', '#1ABC9C', '#34495E']
 
-    # ปักหมุด Depot
-    folium.Marker(location=depot_coords, popup="DEPOT", icon=folium.Icon(color="red", icon="home")).add_to(m)
-    
-    # ปักหมุดจุดเก็บขยะ
+    # ปักหมุด
+    folium.Marker(location=depot_coords, popup="<b>DEPOT</b>", icon=folium.Icon(color="red", icon="home")).add_to(m)
     for item in locations[1:]:
-        folium.CircleMarker(location=(item[1], item[2]), radius=5, color="blue", fill=True).add_to(m)
+        folium.CircleMarker(location=(item[1], item[2]), radius=6, tooltip=item[0], color="#34495E", fill=True, fill_color="#F1C40F", fill_opacity=0.9).add_to(m)
 
-    # วาดเส้นทางรถวิ่ง
-    colors = ['#FF5733', '#335BFF', '#28B463', '#9B59B6']
     coords_lonlat = {item[0]: (item[2], item[1]) for item in locations}
 
     for trip_idx, route_seq in enumerate(routes):
+        route_color = colors[trip_idx % len(colors)]
         full_route = [nodes[0]] + route_seq + [nodes[0]]
-        # วาดเส้นด้วย AntPath
-        path_coords = []
-        for n in full_route:
-            pt = coords_lonlat[n]
-            path_coords.append((pt[1], pt[0])) # Lat, Lon
+        road_coords_latlon = []
+
+        if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)" and G_osm is not None:
+            # วาดเส้นทางโดยดึงพิกัดทางคณิตศาสตร์จากไฟล์ .osm
+            lons = [coords_lonlat[n][0] for n in full_route]
+            lats = [coords_lonlat[n][1] for n in full_route]
+            snapped_nodes = ox.distance.nearest_nodes(G_osm, lons, lats)
             
-        plugins.AntPath(locations=path_coords, color=colors[trip_idx % len(colors)], weight=5).add_to(m)
+            for k in range(len(snapped_nodes)-1):
+                try:
+                    # หาจุดผ่านทางทั้งหมดระหว่าง Node เริ่มต้น ถึง Node ถัดไป
+                    path = nx.shortest_path(G_osm, source=snapped_nodes[k], target=snapped_nodes[k+1], weight='length')
+                    # ดึงพิกัด (Lat, Lon) ของแต่ละจุดบนกราฟ
+                    for node_id in path:
+                        road_coords_latlon.append((G_osm.nodes[node_id]['y'], G_osm.nodes[node_id]['x']))
+                except nx.NetworkXNoPath:
+                    road_coords_latlon.append((lats[k], lons[k]))
+                    road_coords_latlon.append((lats[k+1], lons[k+1]))
+        else:
+            # วาดเส้นทางโดยใช้ OSRM API (กรณีออนไลน์)
+            coords_string = ";".join([f"{coords_lonlat[n][0]},{coords_lonlat[n][1]}" for n in full_route])
+            url = f"http://router.project-osrm.org/route/v1/driving/{coords_string}?overview=full&geometries=geojson"
+            try:
+                data = requests.get(url, timeout=10).json()
+                road_coords_lonlat = data["routes"][0]["geometry"]["coordinates"]
+                road_coords_latlon = [(pt[1], pt[0]) for pt in road_coords_lonlat]
+            except:
+                road_coords_latlon = [(coords_lonlat[n][1], coords_lonlat[n][0]) for n in full_route]
         
+        if len(road_coords_latlon) > 1:
+            plugins.AntPath(locations=road_coords_latlon, color=route_color, weight=5, opacity=0.8, dash_array=[10, 20], delay=800, tooltip=f"Trip {trip_idx+1}").add_to(m)
+        time.sleep(0.1)
+
     return m
 
 # =====================================================================
 # 🖥️ 7. หน้าจอผู้ใช้งาน (Streamlit UI)
 # =====================================================================
 st.set_page_config(page_title="Smart Waste Collection CVRP", layout="wide")
-st.title("🚛 Smart Waste Collection Routing System (QGIS & OSRM Edition)")
-st.markdown("รองรับการคำนวณเส้นทางจาก **โครงข่ายถนนส่วนตัว (QGIS GeoJSON)** และแผนที่สาธารณะ (OSRM)")
+st.title("🚛 Smart Waste Collection Routing System (.OSM Edition)")
+st.markdown("รองรับการคำนวณเส้นทางจาก **โครงข่ายไฟล์ .osm ส่วนตัว** และแผนที่สาธารณะ (OSRM)")
 
 with st.sidebar:
     st.header("⚙️ 1. เลือกแหล่งข้อมูลโครงข่ายถนน")
     routing_mode = st.radio(
         "Routing Engine:",
-        ("OSRM API (ออนไลน์/สาธารณะ)", "QGIS Custom Map (ออฟไลน์)")
+        ("OSRM API (ออนไลน์/สาธารณะ)", "Local Map (ออฟไลน์ผ่านไฟล์ .osm)")
     )
     
-    qgis_file_path = "sut_roads.geojson"
-    G_qgis = None
-    if routing_mode == "QGIS Custom Map (ออฟไลน์)":
-        if os.path.exists(qgis_file_path):
-            st.success(f"✅ พบไฟล์ `{qgis_file_path}` ในระบบ")
-            G_qgis = build_qgis_graph(qgis_file_path)
-            if G_qgis is None or len(G_qgis.nodes) == 0:
-                st.error("❌ พบไฟล์ GeoJSON แต่ไม่สามารถสกัดข้อมูลเส้นถนนได้ (อาจวาดผิดฟอร์แมต หรือไม่มี LineString)")
-        else:
-            st.warning(f"⚠️ ไม่พบไฟล์ `{qgis_file_path}`! กรุณานำไฟล์ที่ Export จาก QGIS มาวางไว้ในโฟลเดอร์เดียวกับโปรแกรม")
-
-    st.header("⚙️ 2. ปรับแต่งยานพาหนะ (Fleet)")
-    max_vehicles = st.number_input("จำนวนรถขยะที่มีในระบบ", min_value=1, value=2)
-    max_capacity = st.number_input("ความจุสูงสุดของรถ (ลบ.ม.)", min_value=1.0, value=4.5)
+    osm_file_path = "sut_roads.osm"  # 📌 วางไฟล์ชื่อนี้ในโฟลเดอร์เดียวกับโค้ด
+    G_osm = None
     
-    st.header("⚙️ 3. เลือกอัลกอริทึม")
-    algorithm_choice = st.selectbox("เทคนิคการจัดเส้นทาง", ("Clarke-Wright Savings", "Sweep Algorithm"))
-    
-    st.header("🌿 4. ตัวแปรเศรษฐศาสตร์และคาร์บอน")
-    fuel_economy = st.number_input("อัตราสิ้นเปลือง (กม./ลิตร)", value=5.0)
-    fuel_price = st.number_input("ราคาน้ำมัน (บาท/ลิตร)", value=32.94)
-    ef_value = st.number_input("ค่า EF (kgCO₂/ลิตร)", value=2.7446, format="%.4f")
-    gwp_value = st.number_input("ค่า GWP", value=1.0)
-
-# --- ส่วนจัดการตารางข้อมูล ---
-st.subheader("📝 ตารางจัดการข้อมูลพิกัด GPS และปริมาณขยะ")
-df_input = pd.DataFrame(DEFAULT_DATA, columns=["Node_Name", "Latitude", "Longitude", "Demand"])
-edited_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True)
-start_btn = st.button("🚀 ยืนยันข้อมูลและเริ่มการประมวลผล", type="primary")
-
-# =====================================================================
-# 🚀 8. ส่วนประมวลผลหลัก (Execution Block)
-# =====================================================================
-if start_btn:
-    if routing_mode == "QGIS Custom Map (ออฟไลน์)" and not os.path.exists(qgis_file_path):
-        st.error(f"❌ ไม่สามารถประมวลผลได้ เนื่องจากไม่พบไฟล์ `{qgis_file_path}`")
-        st.stop()
-
-    data_to_use = edited_df.values.tolist()
-    nodes, demands = edited_df["Node_Name"].tolist(), dict(zip(edited_df["Node_Name"], edited_df["Demand"]))
-    osrm_input_format = [(row[0], row[1], row[2], row[3]) for row in data_to_use]
-
-    with st.spinner(f"📡 กำลังคำนวณระยะทางจาก {routing_mode}..."):
-        if routing_mode == "QGIS Custom Map (ออฟไลน์)":
-            df_dist = get_distance_matrix_qgis(G_qgis, osrm_input_format)
-        else:
-            df_dist = get_distance_matrix_osrm(osrm_input_format)
-            
-        df_dist.columns = df_dist.index = nodes
-
-        if algorithm_choice == "Clarke-Wright Savings":
-            routes, route_vols = run_savings_algorithm(df_dist, demands, nodes, max_capacity)
-        else:
-            routes, route_vols = run_sweep_algorithm(osrm_input_format, demands, nodes, max_capacity)
-
-        grand_total_distance = sum(sum(df_dist.loc[full_route[k], full_route[k+1]] for k in range(len(full_route)-1)) for full_route in ([nodes[0]] + r + [nodes[0]] for r in routes))
-        grand_total_volume = sum(route_vols)
-        
-        activity_data_A = grand_total_distance / fuel_economy
-        carbon_emitted_E = activity_data_A * ef_value * gwp_value
-        total_fuel_cost = activity_data_A * fuel_price
-        
-        st.success(f"✅ ประมวลผลผ่าน {routing_mode} สำเร็จ!")
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("รอบวิ่ง (Trips)", f"{len(routes)} เที่ยว")
-        col2.metric("ระยะทางจริง", f"{grand_total_distance:.2f} กม.")
-        col3.metric("ปริมาตรขยะ", f"{grand_total_volume:.2f} ลบ.ม.")
-        col4.metric("คาร์บอน (CO₂e)", f"{carbon_emitted_E:.2f} kg")
-        col5.metric("ต้นทุนน้ำมัน", f"฿ {total_fuel_cost:,.2f}")
-        
-        with st.spinner("🗺️ กำลังสร้างแผนที่ GPS Interactive (พร้อมแสดงโครงข่าย QGIS)..."):
-            m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_qgis, qgis_file_path)
-            st_folium(m, width=1200, height=600)
-            
-        st.markdown("### 📋 ตารางการปฏิบัติงานแยกตามยานพาหนะ")
-        fleet_schedule = {f"🚛 รถขยะคันที่ {i+1}": [] for i in range(int(max_vehicles))}
-        for i, r in enumerate(routes):
-            fleet_schedule[f"🚛 รถขยะคันที่ {(i % int(max_vehicles)) + 1}"].append({"trip_sequence": (i // int(max_vehicles)) + 1, "route": r, "vol": route_vols[i]})
-        
-        for vehicle_name, trips in fleet_schedule.items():
-            with st.expander(f"{vehicle_name} (รับผิดชอบ {len(trips)} เที่ยววิ่ง)", expanded=True):
-                for t in trips:
-                    st.info(f"📍 Depot ➡️ {' ➡️ '.join(t['route'])} ➡️ Depot (ขยะ: {t['vol']:.2f} ลบ.ม.)")
+    if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)":
+        if os.path.exists(osm_file_path):
+            with st.spinner("⏳ กำลังแปลงไฟล์ .osm เป็นระบบประสาทข่ายคณิตศาสตร์..."):
+                G_osm = build_osm_graph(osm_file_path)
