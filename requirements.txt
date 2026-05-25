@@ -5,7 +5,6 @@ requests
 folium
 streamlit-folium
 networkx
-geopandas
-shapely
+osmnx
 matplotlib
 openpyxl
