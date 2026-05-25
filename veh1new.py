@@ -12,7 +12,7 @@ import os
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 
-# 🌿 นำเข้าไลบรารีสำหรับการประมวลผล GIS ขั้นสูง (QGIS Integration)
+# 🌿 นำเข้าไลบรารีสำหรับการประมวลผล GIS ขั้นสูง
 import networkx as nx
 import geopandas as gpd
 from shapely.geometry import Point, LineString
@@ -33,7 +33,7 @@ def setup_thai_font():
 setup_thai_font()
 
 # =====================================================================
-# ⚙️ 2. ฐานข้อมูลตั้งต้นสำหรับทดสอบ (SUT Default Data)
+# ⚙️ 2. ฐานข้อมูลตั้งต้น
 # =====================================================================
 DEFAULT_DATA = [
     ("Depot โรงจัดการขยะ", 14.862939, 102.027903, 0.0),
@@ -51,7 +51,6 @@ DEFAULT_DATA = [
 # 🧮 3. ฟังก์ชันคณิตศาสตร์ (Haversine) และ QGIS NetworkX
 # =====================================================================
 def haversine_dist(lon1, lat1, lon2, lat2):
-    """คำนวณระยะทางกระจัด (กม.) ระหว่าง 2 พิกัด"""
     R = 6371.0
     lon1, lat1, lon2, lat2 = map(math.radians, [lon1, lat1, lon2, lat2])
     dlon, dlat = lon2 - lon1, lat2 - lat1
@@ -60,10 +59,14 @@ def haversine_dist(lon1, lat1, lon2, lat2):
 
 @st.cache_data
 def build_qgis_graph(geojson_path):
-    """แปลงไฟล์ GeoJSON จาก QGIS เป็นโครงข่าย Graph ด้วย NetworkX"""
     G = nx.Graph()
     try:
         gdf = gpd.read_file(geojson_path)
+        
+        # ⚠️ แก้ปัญหาที่ 1: บังคับแปลงพิกัด (CRS) ให้เป็น Lat/Lon (EPSG:4326) เสมอ
+        if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+            
         for _, row in gdf.iterrows():
             geom = row.geometry
             if geom and geom.geom_type in ['LineString', 'MultiLineString']:
@@ -76,12 +79,14 @@ def build_qgis_graph(geojson_path):
                         G.add_edge(p1, p2, weight=dist)
         return G
     except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดในการอ่านกราฟ QGIS: {e}")
         return None
 
 def get_nearest_node(G, point):
-    """หาจุดพิกัดบนถนน QGIS ที่ใกล้พิกัดจุดทิ้งขยะมากที่สุด (Snapping)"""
     nearest_node = None
     min_dist = float('inf')
+    if G is None or len(G.nodes) == 0:
+        return point, 0
     for node in G.nodes:
         dist = haversine_dist(point[0], point[1], node[0], node[1])
         if dist < min_dist:
@@ -90,23 +95,21 @@ def get_nearest_node(G, point):
     return nearest_node, min_dist
 
 def get_distance_matrix_qgis(G, locations):
-    """สร้าง Distance Matrix โดยอ้างอิงจากแผนที่ QGIS"""
     N = len(locations)
     distance_matrix = np.zeros((N, N))
-    
-    # ดึงพิกัด (Lon, Lat)
     raw_coords = [(item[2], item[1]) for item in locations]
-    # แปลงให้ติดกับถนนในกราฟ QGIS มากที่สุด
     snapped_nodes = [get_nearest_node(G, pt)[0] for pt in raw_coords]
     
     for i in range(N):
         for j in range(N):
             if i != j:
                 try:
-                    dist = nx.shortest_path_length(G, source=snapped_nodes[i], target=snapped_nodes[j], weight='weight')
+                    if G is not None:
+                        dist = nx.shortest_path_length(G, source=snapped_nodes[i], target=snapped_nodes[j], weight='weight')
+                    else:
+                        dist = haversine_dist(raw_coords[i][0], raw_coords[i][1], raw_coords[j][0], raw_coords[j][1])
                     distance_matrix[i][j] = dist
                 except nx.NetworkXNoPath:
-                    # กรณีเส้นทาง QGIS ขาดช่วง จะใช้ระยะทางกระจัด (Haversine) เป็นแผนสำรอง
                     distance_matrix[i][j] = haversine_dist(raw_coords[i][0], raw_coords[i][1], raw_coords[j][0], raw_coords[j][1])
     return pd.DataFrame(distance_matrix)
 
@@ -173,14 +176,57 @@ def run_savings_algorithm(df_dist, demands, nodes, max_capacity):
                     route_vols.pop(idx_j)
     return routes, route_vols
 
+def run_sweep_algorithm(locations, demands, nodes, max_capacity):
+    depot, depot_lat, depot_lon = nodes[0], locations[0][1], locations[0][2]
+    customer_angles = []
+    for i, item in enumerate(locations[1:]):
+        node_name, lat, lon = item[0], item[1], item[2]
+        angle = math.degrees(math.atan2(lat - depot_lat, lon - depot_lon))
+        if angle < 0: angle += 360
+        customer_angles.append({"node": node_name, "angle": angle, "vol": demands[node_name]})
+        
+    customer_angles.sort(key=lambda x: x['angle'])
+    routes, route_vols, current_route, current_vol = [], [], [], 0.0
+    
+    for c in customer_angles:
+        if current_vol + c['vol'] <= max_capacity:
+            current_route.append(c['node'])
+            current_vol += c['vol']
+        else:
+            routes.append(current_route)
+            route_vols.append(current_vol)
+            current_route = [c['node']]
+            current_vol = c['vol']
+            
+    if current_route:
+        routes.append(current_route)
+        route_vols.append(current_vol)
+    return routes, route_vols
+
 # =====================================================================
 # 🗺️ 6. โมดูลสร้างแผนที่ Interactive (Folium)
 # =====================================================================
-def create_interactive_map(routes, locations, nodes, routing_mode, G_qgis=None):
+def create_interactive_map(routes, locations, nodes, routing_mode, G_qgis=None, qgis_file_path=None):
     depot_coords = (locations[0][1], locations[0][2])
     m = folium.Map(location=depot_coords, zoom_start=15, tiles='CartoDB positron')
     colors = ['#FF5733', '#335BFF', '#28B463', '#9B59B6', '#E67E22', '#1ABC9C', '#34495E']
     
+    # ⚠️ แก้ปัญหาที่ 2: วาดโครงสร้างถนนจาก QGIS ลงเป็นแผนที่พื้นหลัง (Base Map)
+    if routing_mode == "QGIS Custom Map (ออฟไลน์)" and qgis_file_path is not None and os.path.exists(qgis_file_path):
+        try:
+            # ใช้ GeoPandas โหลดและแปลงพิกัดเพื่อแสดงผลเป็นโครงข่ายเส้นสีเทา
+            gdf_bg = gpd.read_file(qgis_file_path)
+            if gdf_bg.crs is not None and gdf_bg.crs.to_epsg() != 4326:
+                gdf_bg = gdf_bg.to_crs(epsg=4326)
+            
+            folium.GeoJson(
+                gdf_bg,
+                name="QGIS Custom Road Network",
+                style_function=lambda x: {'color': '#7F8C8D', 'weight': 2.5, 'opacity': 0.6, 'dashArray': '5, 5'}
+            ).add_to(m)
+        except Exception as e:
+            st.warning(f"ไม่สามารถวาดกราฟิกถนนพื้นหลัง QGIS ได้: {e}")
+
     # ปักหมุด Depot และจุดทิ้งขยะ
     folium.Marker(location=depot_coords, popup="<b>DEPOT</b>", icon=folium.Icon(color="red", icon="home")).add_to(m)
     for item in locations[1:]:
@@ -194,7 +240,7 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_qgis=None):
         
         road_coords_latlon = []
         if routing_mode == "QGIS Custom Map (ออฟไลน์)" and G_qgis is not None:
-            # วาดเส้นตาม QGIS NetworkX
+            # วาดเส้นทับไปตาม QGIS NetworkX (ที่คำนวณมา)
             for k in range(len(full_route)-1):
                 pt1 = coords_lonlat[full_route[k]]
                 pt2 = coords_lonlat[full_route[k+1]]
@@ -218,6 +264,9 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_qgis=None):
         
         plugins.AntPath(locations=road_coords_latlon, color=route_color, weight=5, dash_array=[10, 20], tooltip=f"Trip {trip_idx+1}").add_to(m)
         time.sleep(0.1)
+    
+    # เพิ่มตัวควบคุม Layer ให้ผู้ใช้เลือกเปิด/ปิดเส้น QGIS ได้
+    folium.LayerControl().add_to(m)
     return m
 
 # =====================================================================
@@ -240,8 +289,8 @@ with st.sidebar:
         if os.path.exists(qgis_file_path):
             st.success(f"✅ พบไฟล์ `{qgis_file_path}` ในระบบ")
             G_qgis = build_qgis_graph(qgis_file_path)
-            if G_qgis is None:
-                st.error("❌ ไฟล์ GeoJSON มีปัญหา ไม่สามารถสร้างโครงข่ายได้")
+            if G_qgis is None or len(G_qgis.nodes) == 0:
+                st.error("❌ พบไฟล์ GeoJSON แต่ไม่สามารถสกัดข้อมูลเส้นถนนได้ (อาจวาดผิดฟอร์แมต หรือไม่มี LineString)")
         else:
             st.warning(f"⚠️ ไม่พบไฟล์ `{qgis_file_path}`! กรุณานำไฟล์ที่ Export จาก QGIS มาวางไว้ในโฟลเดอร์เดียวกับโปรแกรม")
 
@@ -287,13 +336,11 @@ if start_btn:
         if algorithm_choice == "Clarke-Wright Savings":
             routes, route_vols = run_savings_algorithm(df_dist, demands, nodes, max_capacity)
         else:
-            # (สำหรับ Sweep Algorithm สามารถใช้โครงสร้างเดิมได้เพราะอิงมุมจาก Depot เป็นหลัก)
-            pass 
+            routes, route_vols = run_sweep_algorithm(osrm_input_format, demands, nodes, max_capacity)
 
         grand_total_distance = sum(sum(df_dist.loc[full_route[k], full_route[k+1]] for k in range(len(full_route)-1)) for full_route in ([nodes[0]] + r + [nodes[0]] for r in routes))
         grand_total_volume = sum(route_vols)
         
-        # คำนวณสิ่งแวดล้อม & เศรษฐศาสตร์
         activity_data_A = grand_total_distance / fuel_economy
         carbon_emitted_E = activity_data_A * ef_value * gwp_value
         total_fuel_cost = activity_data_A * fuel_price
@@ -306,8 +353,8 @@ if start_btn:
         col4.metric("คาร์บอน (CO₂e)", f"{carbon_emitted_E:.2f} kg")
         col5.metric("ต้นทุนน้ำมัน", f"฿ {total_fuel_cost:,.2f}")
         
-        with st.spinner("🗺️ กำลังสร้างแผนที่ GPS Interactive..."):
-            m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_qgis)
+        with st.spinner("🗺️ กำลังสร้างแผนที่ GPS Interactive (พร้อมแสดงโครงข่าย QGIS)..."):
+            m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_qgis, qgis_file_path)
             st_folium(m, width=1200, height=600)
             
         st.markdown("### 📋 ตารางการปฏิบัติงานแยกตามยานพาหนะ")
