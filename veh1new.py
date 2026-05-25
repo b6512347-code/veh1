@@ -4,29 +4,14 @@ import numpy as np
 import requests
 import time
 import math
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import urllib.request
-import os
-import matplotlib.font_manager as fm
+
+# นำเข้าไลบรารีสำหรับการสร้างแผนที่ GIS แบบ Interactive
+import folium
+from folium import plugins
+from streamlit_folium import st_folium
 
 # =====================================================================
-# 🛠️ 1. การตั้งค่าทรัพยากรและฟอนต์ภาษาไทย (Font Configuration)
-# =====================================================================
-@st.cache_resource
-def setup_thai_font():
-    font_url = "https://github.com/Phonbopit/sarabun-webfont/raw/master/fonts/thsarabunnew-webfont.ttf"
-    font_path = "thsarabunnew-webfont.ttf"
-    if not os.path.exists(font_path):
-        urllib.request.urlretrieve(font_url, font_path)
-    fm.fontManager.addfont(font_path)
-    plt.rcParams['font.family'] = 'TH Sarabun New'
-    plt.rcParams['axes.unicode_minus'] = False
-
-setup_thai_font()
-
-# =====================================================================
-# ⚙️ 2. ฐานข้อมูลตั้งต้นสำหรับทดสอบ (SUT Default Data)
+# ⚙️ 1. ฐานข้อมูลตั้งต้นสำหรับทดสอบ (SUT Default Data)
 # =====================================================================
 DEFAULT_DATA = [
     ("Depot โรงจัดการขยะ", 14.862939, 102.027903, 0.0),
@@ -48,15 +33,14 @@ DEFAULT_DATA = [
 ]
 
 # =====================================================================
-# 📡 3. การเชื่อมต่อโครงข่ายทางภูมิศาสตร์ (OSRM API Integration)
+# 📡 2. การเชื่อมต่อโครงข่ายทางภูมิศาสตร์ (OSRM API Integration)
 # =====================================================================
 @st.cache_data(show_spinner=False)
 def get_distance_matrix(locations):
-    """ฟังก์ชันสร้าง Distance Matrix จากระยะทางขับขี่จริงบนถนน"""
     N = len(locations)
     distance_matrix = np.zeros((N, N))
     CHUNK_SIZE = 50
-    coords = [(item[2], item[1]) for item in locations]
+    coords = [(item[2], item[1]) for item in locations] # (Lon, Lat)
     
     for i in range(0, N, CHUNK_SIZE):
         for j in range(0, N, CHUNK_SIZE):
@@ -83,9 +67,8 @@ def get_distance_matrix(locations):
     return pd.DataFrame(distance_matrix) / 1000.0
 
 def get_osrm_route_geometry(route_seq, coords, depot):
-    """ดึงพิกัดจุดเลี้ยว (Shapepoints) ตามแนวถนนจริงจาก OSRM Route API"""
     full_route = [depot] + route_seq + [depot]
-    route_coords = [coords[n] for n in full_route]
+    route_coords = [coords[n] for n in full_route] # (Lon, Lat)
     
     coords_string = ";".join([f"{lon},{lat}" for lon, lat in route_coords])
     url = f"http://router.project-osrm.org/route/v1/driving/{coords_string}?overview=full&geometries=geojson"
@@ -94,13 +77,13 @@ def get_osrm_route_geometry(route_seq, coords, depot):
         response = requests.get(url)
         data = response.json()
         if data.get("code") == "Ok":
-            return data["routes"][0]["geometry"]["coordinates"]
+            return data["routes"][0]["geometry"]["coordinates"] # คืนค่าพิกัดตามแนวถนนจริง (Lon, Lat)
     except Exception as e:
         pass
     return route_coords
 
 # =====================================================================
-# 🧠 4. อัลกอริทึมการจัดเส้นทาง (Optimization Engines)
+# 🧠 3. อัลกอริทึมการจัดเส้นทาง (Optimization Engines)
 # =====================================================================
 def run_savings_algorithm(df_dist, demands, nodes, max_capacity):
     depot = nodes[0]
@@ -172,55 +155,69 @@ def run_sweep_algorithm(locations, demands, nodes, max_capacity):
     return routes, route_vols
 
 # =====================================================================
-# 🎨 5. โมดูลแสดงผลแผนที่ (Data Visualization Module)
+# 🗺️ 4. โมดูลสร้างแผนที่ Interactive แบบ GPS (Folium Map Module)
 # =====================================================================
-def plot_routes(routes, locations, nodes, title, grand_total_distance):
-    depot = nodes[0]
-    coords = {item[0]: (item[2], item[1]) for item in locations} 
-    
-    fig, ax = plt.subplots(figsize=(12, 8))
-    cmap = cm.get_cmap('tab20', max(20, len(routes)))
+def create_interactive_map(routes, locations, nodes):
+    # 1. ตั้งค่าศูนย์กลางแผนที่ไปที่พิกัดของ Depot (Lat, Lon)
+    depot_coords = (locations[0][1], locations[0][2])
+    m = folium.Map(location=depot_coords, zoom_start=15, tiles='CartoDB positron')
 
+    # ชุดสีสำหรับแต่ละรอบวิ่ง
+    colors = ['#FF5733', '#335BFF', '#28B463', '#9B59B6', '#E67E22', '#1ABC9C', '#34495E', '#E74C3C']
+    coords_lonlat = {item[0]: (item[2], item[1]) for item in locations} # สำหรับส่งให้ OSRM
+
+    # 2. ปักหมุด Depot ด้วยไอคอนพิเศษ
+    folium.Marker(
+        location=depot_coords,
+        popup=folium.Popup(f"<b>DEPOT</b><br>โรงจัดการขยะ", max_width=200),
+        icon=folium.Icon(color="red", icon="home", prefix="fa")
+    ).add_to(m)
+
+    # 3. ปักหมุดจุดเก็บขยะ (Customers)
+    for i, item in enumerate(locations[1:]):
+        node_name, lat, lon, demand = item[0], item[1], item[2], item[3]
+        folium.CircleMarker(
+            location=(lat, lon),
+            radius=6,
+            popup=folium.Popup(f"<b>{node_name}</b><br>ปริมาณขยะ: {demand} ลบ.ม.", max_width=250),
+            tooltip=node_name,
+            color="#34495E",
+            fill=True,
+            fill_color="#F1C40F",
+            fill_opacity=0.9
+        ).add_to(m)
+
+    # 4. ลากเส้นทางตามพิกัดถนนจริง พร้อมทำแอนิเมชันทิศทางการวิ่ง (AntPath)
     for trip_idx, route_seq in enumerate(routes):
-        route_color = cmap(trip_idx % 20)
-        road_coords = get_osrm_route_geometry(route_seq, coords, depot)
-        x_vals = [pt[0] for pt in road_coords]
-        y_vals = [pt[1] for pt in road_coords]
+        route_color = colors[trip_idx % len(colors)]
         
-        ax.plot(x_vals, y_vals, color=route_color, linewidth=2.5, alpha=0.8, label=f'Trip {trip_idx+1}')
-
-        for k in range(0, len(x_vals) - 1, 15):
-            ax.annotate('', xy=(x_vals[k+1], y_vals[k+1]), xytext=(x_vals[k], y_vals[k]),
-                         arrowprops=dict(arrowstyle="->", color=route_color, lw=1.5, alpha=0.7))
+        # ดึงพิกัดถนนจริงจาก OSRM (ได้ค่ากลับมาเป็น Lon, Lat)
+        road_coords_lonlat = get_osrm_route_geometry(route_seq, coords_lonlat, nodes[0])
         
-        time.sleep(0.2)
+        # แปลงเป็น (Lat, Lon) เพื่อให้ Folium เข้าใจ
+        road_coords_latlon = [(pt[1], pt[0]) for pt in road_coords_lonlat]
+        
+        # วาดเส้นทางแบบมดเดิน (แอนิเมชันวิ่งตามแนวถนน)
+        plugins.AntPath(
+            locations=road_coords_latlon,
+            color=route_color,
+            weight=5,
+            opacity=0.8,
+            dash_array=[10, 20],
+            delay=800, # ความเร็วของแอนิเมชัน
+            tooltip=f"<b>Trip {trip_idx+1}</b> (คลิกดูรายละเอียด)"
+        ).add_to(m)
+        
+        time.sleep(0.1)
 
-    all_x = [coords[n][0] for n in nodes[1:]]
-    all_y = [coords[n][1] for n in nodes[1:]]
-    ax.scatter(all_x, all_y, color='dimgray', zorder=5, s=25)
-    ax.scatter(coords[depot][0], coords[depot][1], color='red', marker='*', s=350, zorder=10, label='Depot')
-
-    for node, (x, y) in coords.items():
-        if node == depot:
-            ax.text(x, y + 0.0004, 'DEPOT (บ่อขยะ)', fontsize=10, fontweight='bold', color='red', ha='center')
-        else:
-            short_name = str(node).replace(' จุดที่ ', '-')
-            ax.text(x + 0.0001, y + 0.0001, short_name, fontsize=8, color='black', alpha=0.8)
-
-    ax.set_title(f'{title}\n[ระบบแสดงผลอิงตามโครงข่ายถนนจริงบนระบบ GIS]', fontsize=16, fontweight='bold')
-    ax.set_xlabel('Longitude (พิกัด X)', fontsize=12)
-    ax.set_ylabel('Latitude (พิกัด Y)', fontsize=12)
-    ax.grid(True, linestyle=':', alpha=0.5)
-    ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=10, title="ลำดับรอบวิ่ง (Trip No.)")
-    
-    return fig
+    return m
 
 # =====================================================================
-# 🖥️ 6. หน้าจอผู้ใช้งาน (Streamlit UI)
+# 🖥️ 5. หน้าจอผู้ใช้งาน (Streamlit UI)
 # =====================================================================
 st.set_page_config(page_title="Smart Waste Collection CVRP", layout="wide")
-st.title("🚛 Smart Waste Collection Routing System")
-st.markdown("ระบบวิเคราะห์และแสดงผลลัพธ์การจัดเส้นทางแบบปรับเปลี่ยนตัวแปรได้ (Multi-Vehicle DSS) พร้อมโครงข่ายถนนจริง")
+st.title("🚛 Smart Waste Collection Routing System (GIS Edition)")
+st.markdown("ระบบวิเคราะห์และแสดงผลแผนที่อินเทอร์แอกทีฟตามพิกัด GPS จริงบนโครงข่ายถนน")
 
 # --- แถบเครื่องมือด้านข้าง ---
 with st.sidebar:
@@ -234,29 +231,24 @@ with st.sidebar:
     st.header("📂 3. วิธีการนำเข้าข้อมูลพิกัด")
     data_mode = st.radio(
         "เลือกรูปแบบข้อมูลที่ต้องการใช้งาน:",
-        ("ใช้ข้อมูลทดสอบ มทส. (SUT Sample Data)", "กรอกข้อมูลใหม่เองทั้งหมด (Manual Entry)", "อัปโหลดไฟล์ Excel/CSV")
+        ("ใช้ข้อมูลทดสอบ มทส.", "กรอกข้อมูลใหม่เองทั้งหมด", "อัปโหลดไฟล์ Excel/CSV")
     )
     
     uploaded_file = None
     if data_mode == "อัปโหลดไฟล์ Excel/CSV":
         uploaded_file = st.file_uploader("อัปโหลดไฟล์ Excel/CSV", type=["xlsx", "csv"])
 
-# --- ส่วนจัดการตารางข้อมูล (Dynamic Data Editor) ---
-st.subheader("📝 ตารางจัดการข้อมูลพิกัดและปริมาณขยะ (Data Editor)")
+# --- ส่วนจัดการตารางข้อมูล ---
+st.subheader("📝 ตารางจัดการข้อมูลพิกัด GPS และปริมาณขยะ")
 
-if data_mode == "ใช้ข้อมูลทดสอบ มทส. (SUT Sample Data)":
+if data_mode == "ใช้ข้อมูลทดสอบ มทส.":
     df_input = pd.DataFrame(DEFAULT_DATA, columns=["Node_Name", "Latitude", "Longitude", "Demand"])
-    st.info("💡 กำลังใช้งานข้อมูลจำลองในพื้นที่ มทส. คุณสามารถดับเบิ้ลคลิกแก้ไขตัวเลข Demand หรือพิกัดในตารางได้ทันที")
-
-elif data_mode == "กรอกข้อมูลใหม่เองทั้งหมด (Manual Entry)":
-    # สร้างโครงสร้างข้อมูลเริ่มต้นแถวเดียวเพื่อให้ระบบล็อก Data Type ไว้ (ป้องกัน Error)
+elif data_mode == "กรอกข้อมูลใหม่เองทั้งหมด":
     df_input = pd.DataFrame([
         ("Depot โรงจัดการขยะหลัก", 14.862939, 102.027903, 0.0),
-        ("จุดเก็บขยะตัวอย่างที่ 1", 14.869030, 102.021350, 0.5)
+        ("จุดทิ้งขยะตัวอย่าง 1", 14.869030, 102.021350, 0.5)
     ], columns=["Node_Name", "Latitude", "Longitude", "Demand"])
-    st.success("💡 โหมดกรอกข้อมูลเอง: แถวแรกสุดจะถูกกำหนดให้เป็นศูนย์กลาง (Depot) เสมอ คุณสามารถกดปุ่ม ➕ ที่ท้ายตารางเพื่อเพิ่มจุดเก็บขยะใหม่ได้ตามต้องการ")
-
-else: # โหมดอัปโหลดไฟล์
+else:
     if uploaded_file is not None:
         if uploaded_file.name.endswith('.csv'):
             df_input = pd.read_csv(uploaded_file)
@@ -266,31 +258,29 @@ else: # โหมดอัปโหลดไฟล์
         st.warning("⚠️ กรุณาทำการอัปโหลดไฟล์ Excel หรือ CSV ที่แถบเมนูด้านข้างก่อนดำเนินการครับ")
         st.stop()
 
-# เปิดฟังก์ชันตารางอัจฉริยะ ให้เพิ่ม/ลบ/แก้ไข แถวข้อมูลได้แบบเรียลไทม์
 edited_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True)
 start_btn = st.button("🚀 ยืนยันข้อมูลและเริ่มการประมวลผล (Start Optimization)", type="primary")
 
 # =====================================================================
-# 🚀 7. ส่วนประมวลผลหลัก (Execution Block)
+# 🚀 6. ส่วนประมวลผลหลัก (Execution Block)
 # =====================================================================
 if start_btn:
     data_to_use = edited_df.values.tolist()
     nodes = edited_df["Node_Name"].tolist()
     demands = dict(zip(edited_df["Node_Name"], edited_df["Demand"]))
     
-    # ดักข้อผิดพลาดเชิงโลจิสติกส์ขั้นพื้นฐาน
     if len(nodes) < 2:
-        st.error("❌ เกิดข้อผิดพลาด: ต้องมีจุดข้อมูลอย่างน้อย 2 จุดขึ้นไป (Depot 1 จุด และจุดเก็บขยะอย่างน้อย 1 จุด)")
+        st.error("❌ ต้องมีจุดข้อมูลอย่างน้อย 2 จุดขึ้นไป (Depot 1 จุด และจุดเก็บขยะอย่างน้อย 1 จุด)")
         st.stop()
         
     max_single_demand = max(demands.values())
     if max_single_demand > max_capacity:
-        st.error(f"❌ พบข้อผิดพลาด: มีจุดเก็บขยะบางจุดที่มีปริมาณขยะ ({max_single_demand} ลบ.ม.) เกินกว่าความจุของตัวรถที่กำหนดไว้ ({max_capacity} ลบ.ม.)")
+        st.error(f"❌ มีจุดเก็บขยะบางจุดที่มีปริมาณขยะ ({max_single_demand} ลบ.ม.) เกินความจุของรถ ({max_capacity} ลบ.ม.)")
         st.stop()
 
     osrm_input_format = [(row[0], row[1], row[2], row[3]) for row in data_to_use]
 
-    with st.spinner("📡 กำลังคำนวณระยะทางขับขี่จริงระหว่างคู่จุดจอดจาก OSRM API..."):
+    with st.spinner("📡 กำลังคำนวณระยะทางจาก OSRM API..."):
         df_dist = get_distance_matrix(osrm_input_format)
         df_dist.columns = nodes
         df_dist.index = nodes
@@ -322,17 +312,24 @@ if start_btn:
         col3.metric("ปริมาตรขยะที่เก็บขน", f"{grand_total_volume:.2f} ลบ.ม.")
         col4.metric("คาร์บอนฟุตพริ้นท์ (CO₂)", f"{carbon_emitted:.2f} กก.")
         
-        with st.spinner("🗺️ กำลังเรนเดอร์กราฟิกแผนที่โครงข่ายถนน..."):
-            fig = plot_routes(routes, osrm_input_format, nodes, f"แผนภาพจำลองเส้นทางจริง ({algorithm_choice})", grand_total_distance)
-            st.pyplot(fig)
+        # -----------------------------------------------------------------
+        # 🗺️ เรนเดอร์แผนที่ Folium แทน Matplotlib
+        # -----------------------------------------------------------------
+        with st.spinner("🗺️ กำลังสร้างแผนที่ GPS Interactive..."):
+            st.markdown("### 🗺️ แผนที่โครงข่ายการเดินรถ (Interactive GPS Map)")
+            st.markdown("สามารถ **ซูมเข้า-ออก** เลื่อนแผนที่ หรือ **นำเมาส์ไปชี้ที่หมุด** เพื่อดูรายละเอียดพิกัดได้ (เส้นปะวิ่งแสดงถึงทิศทางการเดินรถ)")
+            
+            # สร้าง Object แผนที่
+            m = create_interactive_map(routes, osrm_input_format, nodes)
+            # นำไปแสดงผลบนหน้าเว็บผ่าน streamlit-folium
+            st_folium(m, width=1200, height=600, returned_objects=[])
         
         # -----------------------------------------------------------------
-        # 📋 โมดูลการจัดสรรตารางงานให้รถ (Multi-Vehicle Dispatch Schedule)
+        # 📋 โมดูลการจัดสรรตารางงาน
         # -----------------------------------------------------------------
         st.markdown("### 📋 ตารางการปฏิบัติงานแยกตามยานพาหนะ (Fleet Dispatch Schedule)")
-        
         if len(routes) > max_vehicles:
-             st.info(f"💡 ข้อสังเกต: ระบบมีรถ {max_vehicles} คัน แต่มีภารกิจทั้งหมด {len(routes)} รอบวิ่ง ดังนั้นรถบางคันจะต้องวิ่งมากกว่า 1 รอบ (Multi-Trip)")
+             st.info(f"💡 ระบบมีรถ {max_vehicles} คัน แต่มีภารกิจทั้งหมด {len(routes)} รอบวิ่ง ดังนั้นรถบางคันจะต้องวิ่งมากกว่า 1 รอบ (Multi-Trip)")
 
         fleet_schedule = {f"🚛 รถขยะคันที่ {i+1}": [] for i in range(int(max_vehicles))}
         
