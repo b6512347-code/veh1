@@ -2,6 +2,10 @@ streamlit
 pandas
 numpy
 requests
-openpyxl
 folium
 streamlit-folium
+networkx
+geopandas
+shapely
+matplotlib
+openpyxl
