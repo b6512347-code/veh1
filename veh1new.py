@@ -256,3 +256,82 @@ with st.sidebar:
         if os.path.exists(osm_file_path):
             with st.spinner("⏳ กำลังแปลงไฟล์ .osm เป็นระบบประสาทข่ายคณิตศาสตร์..."):
                 G_osm = build_osm_graph(osm_file_path)
+            if G_osm is not None:
+                st.success(f"✅ สร้างโครงข่ายสำเร็จ! (จำนวนจุดตัด: {len(G_osm.nodes)} จุด)")
+            else:
+                st.error("❌ ไฟล์ .osm มีปัญหา ไม่สามารถสกัดข้อมูลเส้นถนนได้")
+        else:
+            st.warning(f"⚠️ ไม่พบไฟล์ `{osm_file_path}`! กรุณา Export แผนที่จาก QGIS เป็นสกุล .osm แล้วนำมาวางไว้ที่เดียวกับโค้ดครับ")
+
+    st.header("⚙️ 2. ปรับแต่งยานพาหนะ (Fleet)")
+    max_vehicles = st.number_input("จำนวนรถขยะที่มี", min_value=1, value=2)
+    max_capacity = st.number_input("ความจุสูงสุดของรถ (ลบ.ม.)", min_value=1.0, value=4.5)
+    
+    st.header("⚙️ 3. เลือกอัลกอริทึม")
+    algorithm_choice = st.selectbox("เทคนิคการจัดเส้นทาง", ("Clarke-Wright Savings", "Sweep Algorithm"))
+    
+    st.header("🌿 4. ตัวแปรเศรษฐศาสตร์และคาร์บอน")
+    fuel_economy = st.number_input("อัตราสิ้นเปลือง (กม./ลิตร)", value=5.0)
+    fuel_price = st.number_input("ราคาน้ำมัน (บาท/ลิตร)", value=32.94)
+    ef_value = st.number_input("ค่า EF (kgCO₂/ลิตร)", value=2.7446, format="%.4f")
+    gwp_value = st.number_input("ค่า GWP", value=1.0)
+
+# --- ส่วนจัดการตารางข้อมูล ---
+st.subheader("📝 ตารางจัดการข้อมูลพิกัด GPS และปริมาณขยะ")
+df_input = pd.DataFrame(DEFAULT_DATA, columns=["Node_Name", "Latitude", "Longitude", "Demand"])
+edited_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True)
+start_btn = st.button("🚀 ยืนยันข้อมูลและเริ่มการประมวลผล", type="primary")
+
+# =====================================================================
+# 🚀 8. ส่วนประมวลผลหลัก (Execution Block)
+# =====================================================================
+if start_btn:
+    if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)" and G_osm is None:
+        st.error(f"❌ ไม่สามารถประมวลผลได้ เนื่องจากไม่พบไฟล์ `{osm_file_path}` หรือโครงข่ายกราฟไม่สมบูรณ์")
+        st.stop()
+
+    data_to_use = edited_df.values.tolist()
+    nodes, demands = edited_df["Node_Name"].tolist(), dict(zip(edited_df["Node_Name"], edited_df["Demand"]))
+    osrm_input_format = [(row[0], row[1], row[2], row[3]) for row in data_to_use]
+
+    with st.spinner(f"📡 กำลังคำนวณระยะทางจาก {routing_mode}..."):
+        if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)":
+            df_dist = get_distance_matrix_osm(G_osm, osrm_input_format)
+        else:
+            df_dist = get_distance_matrix_osrm(osrm_input_format)
+            
+        df_dist.columns = df_dist.index = nodes
+
+        if algorithm_choice == "Clarke-Wright Savings":
+            routes, route_vols = run_savings_algorithm(df_dist, demands, nodes, max_capacity)
+        else:
+            routes, route_vols = run_sweep_algorithm(osrm_input_format, demands, nodes, max_capacity)
+
+        grand_total_distance = sum(sum(df_dist.loc[full_route[k], full_route[k+1]] for k in range(len(full_route)-1)) for full_route in ([nodes[0]] + r + [nodes[0]] for r in routes))
+        grand_total_volume = sum(route_vols)
+        
+        activity_data_A = grand_total_distance / fuel_economy
+        carbon_emitted_E = activity_data_A * ef_value * gwp_value
+        total_fuel_cost = activity_data_A * fuel_price
+        
+        st.success(f"✅ ประมวลผลผ่าน {routing_mode} สำเร็จ!")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("รอบวิ่ง (Trips)", f"{len(routes)} เที่ยว")
+        col2.metric("ระยะทางจริง", f"{grand_total_distance:.2f} กม.")
+        col3.metric("ปริมาตรขยะ", f"{grand_total_volume:.2f} ลบ.ม.")
+        col4.metric("คาร์บอน (CO₂e)", f"{carbon_emitted_E:.2f} kg")
+        col5.metric("ต้นทุนน้ำมัน", f"฿ {total_fuel_cost:,.2f}")
+        
+        with st.spinner("🗺️ กำลังเรนเดอร์แผนที่ GPS Interactive (ตามโครงข่าย .osm)..."):
+            m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_osm)
+            st_folium(m, width=1200, height=600)
+            
+        st.markdown("### 📋 ตารางการปฏิบัติงานแยกตามยานพาหนะ")
+        fleet_schedule = {f"🚛 รถขยะคันที่ {i+1}": [] for i in range(int(max_vehicles))}
+        for i, r in enumerate(routes):
+            fleet_schedule[f"🚛 รถขยะคันที่ {(i % int(max_vehicles)) + 1}"].append({"trip_sequence": (i // int(max_vehicles)) + 1, "route": r, "vol": route_vols[i]})
+        
+        for vehicle_name, trips in fleet_schedule.items():
+            with st.expander(f"{vehicle_name} (รับผิดชอบ {len(trips)} เที่ยววิ่ง)", expanded=True):
+                for t in trips:
+                    st.info(f"📍 Depot ➡️ {' ➡️ '.join(t['route'])} ➡️ Depot (ขยะ: {t['vol']:.2f} ลบ.ม.)")
