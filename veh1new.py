@@ -14,7 +14,8 @@ import matplotlib.pyplot as plt
 
 # 🌿 นำเข้าไลบรารีสำหรับสร้างโครงข่าย
 import networkx as nx
-import xml.etree.ElementTree as ET  # โมดูลพื้นฐานสำหรับอ่านไฟล์ XML (.osm)
+import xml.etree.ElementTree as ET
+import io # สำหรับอ่านไฟล์ที่อัปโหลดผ่านหน้าเว็บ
 
 # =====================================================================
 # 🛠️ 1. การตั้งค่าทรัพยากรและฟอนต์
@@ -44,7 +45,7 @@ DEFAULT_DATA = [
 ]
 
 # =====================================================================
-# 🧮 2. โมดูลประมวลผลไฟล์ .OSM (แบบสกัดโค้ดเอง ไม่ง้อ OSMnx)
+# 🧮 2. โมดูลประมวลผลไฟล์ .OSM (แปลงข้อมูลดิบเป็นสมการกราฟ)
 # =====================================================================
 def haversine_dist(lon1, lat1, lon2, lat2):
     R = 6371.0
@@ -54,11 +55,12 @@ def haversine_dist(lon1, lat1, lon2, lat2):
     return R * (2 * math.asin(math.sqrt(a)))
 
 @st.cache_data
-def build_osm_graph_manual(osm_file_path):
-    """อ่านไฟล์ .osm และสร้างเป็นโครงข่ายเส้นทาง (Bypass กฎของ OSMnx)"""
+def build_osm_graph_manual(osm_string_data):
+    """อ่านข้อมูล .osm ที่ผู้ใช้อัปโหลดและสร้างเป็นโครงข่ายเส้นทาง"""
     G = nx.Graph()
     try:
-        tree = ET.parse(osm_file_path)
+        # ใช้ io.StringIO เพื่ออ่าน String XML เป็นไฟล์
+        tree = ET.parse(io.StringIO(osm_string_data))
         root = tree.getroot()
         nodes = {}
         
@@ -79,14 +81,14 @@ def build_osm_graph_manual(osm_file_path):
                     lat1, lon1 = nodes[n1]
                     lat2, lon2 = nodes[n2]
                     dist = haversine_dist(lon1, lat1, lon2, lat2)
-                    G.add_edge(n1, n2, weight=dist) # เก็บน้ำหนักเป็นระยะทาง กม.
+                    G.add_edge(n1, n2, weight=dist)
         return G
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านโครงสร้างไฟล์ .osm: {e}")
+        st.error(f"เกิดข้อผิดพลาดในการแปลไฟล์ .osm: {e}")
         return None
 
 def get_nearest_node(G, lon, lat):
-    """ฟังก์ชันค้นหาพิกัดถนนที่ใกล้ที่สุดแบบกำหนดเอง"""
+    """ค้นหาพิกัดถนนที่ใกล้ที่สุด"""
     nearest_n = None
     min_d = float('inf')
     for n in G.nodes:
@@ -203,7 +205,14 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_osm=None):
     m = folium.Map(location=depot_coords, zoom_start=15, tiles='CartoDB positron')
     colors = ['#FF5733', '#335BFF', '#28B463', '#9B59B6', '#E67E22', '#1ABC9C', '#34495E']
 
-    # ปักหมุด
+    # ปักหมุดถนนที่วาดเอง (ถ้ามี)
+    if G_osm is not None:
+        for u, v in G_osm.edges():
+            lon1, lat1 = G_osm.nodes[u]['x'], G_osm.nodes[u]['y']
+            lon2, lat2 = G_osm.nodes[v]['x'], G_osm.nodes[v]['y']
+            folium.PolyLine([(lat1, lon1), (lat2, lon2)], color="#BDC3C7", weight=2, opacity=0.5, dash_array="5, 5").add_to(m)
+
+    # ปักหมุดสถานที่
     folium.Marker(location=depot_coords, popup="<b>DEPOT</b>", icon=folium.Icon(color="red", icon="home")).add_to(m)
     for item in locations[1:]:
         folium.CircleMarker(location=(item[1], item[2]), radius=6, tooltip=item[0], color="#34495E", fill=True, fill_color="#F1C40F", fill_opacity=0.9).add_to(m)
@@ -215,8 +224,8 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_osm=None):
         full_route = [nodes[0]] + route_seq + [nodes[0]]
         road_coords_latlon = []
 
-        if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm QGIS)" and G_osm is not None:
-            # วาดเส้นทางโดยดึงพิกัดจาก Graph ที่สร้างเอง
+        if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)" and G_osm is not None:
+            # ลากเส้นตามกราฟ .osm ของเราเอง
             for k in range(len(full_route)-1):
                 lon1, lat1 = coords_lonlat[full_route[k]][0], coords_lonlat[full_route[k]][1]
                 lon2, lat2 = coords_lonlat[full_route[k+1]][0], coords_lonlat[full_route[k+1]][1]
@@ -229,6 +238,7 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_osm=None):
                 except nx.NetworkXNoPath:
                     road_coords_latlon.extend([(lat1, lon1), (lat2, lon2)])
         else:
+            # ลากเส้นด้วย OSRM
             coords_string = ";".join([f"{coords_lonlat[n][0]},{coords_lonlat[n][1]}" for n in full_route])
             url = f"http://router.project-osrm.org/route/v1/driving/{coords_string}?overview=full&geometries=geojson"
             try:
@@ -247,26 +257,29 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_osm=None):
 # 🖥️ 6. หน้าจอผู้ใช้งาน (Streamlit UI)
 # =====================================================================
 st.set_page_config(page_title="Smart Waste Collection CVRP", layout="wide")
-st.title("🚛 Smart Waste Collection Routing System (QGIS .OSM Edition)")
-st.markdown("ระบบวิเคราะห์เส้นทางขยะ รองรับการคำนวณจาก **ไฟล์ .osm ที่คุณวาดเองใน QGIS**")
+st.title("🚛 Smart Waste Collection Routing System (.OSM Edition)")
+st.markdown("ระบบวิเคราะห์เส้นทางขยะ รองรับการอัปโหลด **ไฟล์ .osm จาก JOSM/QGIS** โดยตรงหน้าเว็บ")
 
 with st.sidebar:
     st.header("⚙️ 1. เลือกโครงข่ายถนน")
-    routing_mode = st.radio("Routing Engine:", ("OSRM API (ออนไลน์/สาธารณะ)", "Local Map (ออฟไลน์ผ่านไฟล์ .osm QGIS)"))
+    routing_mode = st.radio("Routing Engine:", ("OSRM API (ออนไลน์/สาธารณะ)", "Local Map (ออฟไลน์ผ่านไฟล์ .osm)"))
     
-    osm_file_path = "sut_roads.osm"  # 📌 วางไฟล์ชื่อนี้ในโฟลเดอร์เดียวกับโค้ด
     G_osm = None
-    
-    if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm QGIS)":
-        if os.path.exists(osm_file_path):
-            with st.spinner("⏳ กำลังแปลงไฟล์ .osm เป็นระบบโครงข่าย..."):
-                G_osm = build_osm_graph_manual(osm_file_path)
-            if G_osm is not None and len(G_osm.nodes) > 0:
-                st.success(f"✅ สร้างโครงข่ายสำเร็จ! (จำนวนจุดตัด: {len(G_osm.nodes)} จุด)")
+    if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)":
+        # ⚠️ สร้างกล่องให้อัปโหลดไฟล์ .osm บนหน้าเว็บโดยตรง
+        uploaded_osm = st.file_uploader("📂 อัปโหลดไฟล์ .osm ของคุณที่นี่", type=["osm"])
+        
+        if uploaded_osm is not None:
+            with st.spinner("⏳ กำลังอ่านโครงสร้างไฟล์ .osm..."):
+                osm_content = uploaded_osm.getvalue().decode("utf-8") # อ่านเนื้อหาไฟล์
+                G_osm = build_osm_graph_manual(osm_content)
+            
+            if G_osm is not None and len(G_osm.edges) > 0:
+                st.success(f"✅ โครงข่ายสมบูรณ์! (พิกัด: {len(G_osm.nodes)} จุด | เส้นทาง: {len(G_osm.edges)} เส้น)")
             else:
-                st.error("❌ ไฟล์ .osm ว่างเปล่า หรือไม่มีข้อมูลเส้น (Way)")
+                st.error("❌ ไฟล์ที่อัปโหลดไม่มีข้อมูลเส้นทาง (Way) กรุณาตรวจสอบการ Export จาก JOSM")
         else:
-            st.warning(f"⚠️ ไม่พบไฟล์ `{osm_file_path}`! กรุณา Export แผนที่จาก QGIS แล้วนำมาวางไว้ที่เดียวกับโค้ดครับ")
+            st.warning("⚠️ โปรดอัปโหลดไฟล์ .osm ของคุณเพื่อดำเนินการต่อ")
 
     st.header("⚙️ 2. ปรับแต่งยานพาหนะ")
     max_vehicles = st.number_input("จำนวนรถขยะที่มี", min_value=1, value=2)
@@ -286,8 +299,8 @@ edited_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=Tru
 start_btn = st.button("🚀 เริ่มการประมวลผล", type="primary")
 
 if start_btn:
-    if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm QGIS)" and G_osm is None:
-        st.error(f"❌ ไม่สามารถประมวลผลได้ เนื่องจากโครงข่ายกราฟไม่สมบูรณ์")
+    if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)" and (G_osm is None or len(G_osm.edges) == 0):
+        st.error(f"❌ ไม่สามารถประมวลผลได้ เนื่องจากคุณยังไม่ได้อัปโหลดไฟล์ .osm หรือโครงข่ายถนนไม่สมบูรณ์")
         st.stop()
 
     data_to_use = edited_df.values.tolist()
@@ -295,7 +308,7 @@ if start_btn:
     osrm_input_format = [(row[0], row[1], row[2], row[3]) for row in data_to_use]
 
     with st.spinner(f"📡 กำลังคำนวณระยะทางจาก {routing_mode}..."):
-        if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm QGIS)":
+        if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)":
             df_dist = get_distance_matrix_osm(G_osm, osrm_input_format)
         else:
             df_dist = get_distance_matrix_osrm(osrm_input_format)
