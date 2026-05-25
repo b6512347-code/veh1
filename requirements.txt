@@ -1,6 +1,7 @@
 streamlit
 pandas
 numpy
-matplotlib
 requests
 openpyxl
+folium
+streamlit-folium
