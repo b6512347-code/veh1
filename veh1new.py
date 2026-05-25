@@ -62,6 +62,7 @@ def build_osm_graph_manual(osm_string_data):
     """อ่านข้อมูล .osm ที่ผู้ใช้อัปโหลดและสร้างเป็นโครงข่ายเส้นทาง"""
     G = nx.Graph()
     try:
+        # ใช้ io.StringIO เพื่ออ่าน String XML เป็นไฟล์
         tree = ET.parse(io.StringIO(osm_string_data))
         root = tree.getroot()
         nodes = {}
@@ -86,4 +87,6 @@ def build_osm_graph_manual(osm_string_data):
                     G.add_edge(n1, n2, weight=dist)
         return G
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการแปล
+        # ⚠️ แก้ไขบรรทัดที่มีปัญหาตรงนี้ (ตรวจสอบให้แน่ใจว่าอยู่ในบรรทัดเดียวกันทั้งหมด)
+        st.error(f"เกิดข้อผิดพลาดในการแปลไฟล์ .osm: {e}")
+        return None
