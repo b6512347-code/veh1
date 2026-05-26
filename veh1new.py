@@ -15,9 +15,9 @@ import matplotlib.pyplot as plt
 # 🌿 นำเข้าไลบรารีสำหรับสร้างโครงข่าย
 import networkx as nx
 import xml.etree.ElementTree as ET
-import io # สำหรับอ่านไฟล์ที่อัปโหลดผ่านหน้าเว็บ
+import io
 
-# Set page config ให้แสดงผลกว้างเต็มตา (ต้องอยู่บนสุดเสมอ)
+# Set page config ให้แสดงผลกว้างเต็มตา
 st.set_page_config(page_title="VRP Garbage Routing", layout="wide")
 
 # =====================================================================
@@ -35,7 +35,7 @@ def setup_thai_font():
 
 setup_thai_font()
 
-# ⚠️ เอาจุด Depot ออกจากตารางตั้งต้น (เหลือแค่จุดเก็บขยะ)
+# ตารางจุดทิ้งขยะตั้งต้น (ไม่มี Depot)
 DEFAULT_DATA = [
     ("ภูมิทัศน์(ใหม่)", 14.86903, 102.02135, 0.3),
     ("สวนพฤกษศาสตร์", 14.86991, 102.022113, 0.3),
@@ -213,9 +213,7 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_osm=None):
             lon2, lat2 = G_osm.nodes[v]['x'], G_osm.nodes[v]['y']
             folium.PolyLine([(lat1, lon1), (lat2, lon2)], color="#BDC3C7", weight=2, opacity=0.5, dash_array="5, 5").add_to(m)
 
-    # ปักหมุด Depot เป็นรูปบ้านสีแดง
     folium.Marker(location=depot_coords, popup="<b>DEPOT (ศูนย์กลาง)</b>", icon=folium.Icon(color="red", icon="home")).add_to(m)
-    
     for item in locations[1:]:
         folium.CircleMarker(location=(item[1], item[2]), radius=6, tooltip=item[0], color="#34495E", fill=True, fill_color="#F1C40F", fill_opacity=0.9).add_to(m)
 
@@ -254,13 +252,14 @@ def create_interactive_map(routes, locations, nodes, routing_mode, G_osm=None):
     return m
 
 # =====================================================================
-# 🖥️ 6. หน้าจอผู้ใช้งาน (Streamlit UI) และ Execution
+# 🖥️ 6. หน้าจอผู้ใช้งาน (Streamlit UI)
 # =====================================================================
 st.title("🚛 Smart Waste Collection Routing System (.OSM Edition)")
-st.markdown("ระบบวิเคราะห์เส้นทางขยะ รองรับการอัปโหลด **ไฟล์ .osm จาก JOSM/QGIS** โดยตรงหน้าเว็บ")
+st.markdown("ระบบวิเคราะห์เส้นทางขยะแบบ Interactive รองรับโครงข่ายถนนจริง และการจัดการข้อมูลภาคสนาม")
 
+# ----------------- SIDEBAR -----------------
 with st.sidebar:
-    st.header("⚙️ 1. เลือกโครงข่ายถนน")
+    st.header("⚙️ 1. เลือกโครงข่ายถนน (Map Source)")
     routing_mode = st.radio("Routing Engine:", ("OSRM API (ออนไลน์/สาธารณะ)", "Local Map (ออฟไลน์ผ่านไฟล์ .osm)"))
     
     G_osm = None
@@ -277,7 +276,6 @@ with st.sidebar:
         else:
             st.warning("⚠️ โปรดอัปโหลดไฟล์ .osm ของคุณเพื่อดำเนินการต่อ")
 
-    # ⚠️ เพิ่มส่วนควบคุมพิกัด Depot ไว้ตรงนี้
     st.header("📍 2. ตั้งค่าจุดศูนย์กลาง (Depot)")
     depot_name = st.text_input("ชื่อจุด Depot", value="Depot โรงจัดการขยะ")
     depot_lat = st.number_input("ละติจูด (Latitude)", value=14.862939, format="%.6f")
@@ -285,7 +283,8 @@ with st.sidebar:
 
     st.header("⚙️ 3. ปรับแต่งยานพาหนะ")
     max_vehicles = st.number_input("จำนวนรถขยะที่มี", min_value=1, value=2)
-    max_capacity = st.number_input("ความจุสูงสุดของรถ (ลบ.ม.)", min_value=1.0, value=15.0)
+    # ⚠️ ปรับความจุเริ่มต้นกลับมาเป็น 4.5 ลบ.ม. ตามที่คุณต้องการ
+    max_capacity = st.number_input("ความจุสูงสุดของรถ (ลบ.ม.)", min_value=1.0, value=4.5)
     
     st.header("⚙️ 4. อัลกอริทึม & คาร์บอน")
     algorithm_choice = st.selectbox("เทคนิคการจัดเส้นทาง", ("Clarke-Wright Savings", "Sweep Algorithm"))
@@ -294,16 +293,29 @@ with st.sidebar:
     ef_value = st.number_input("ค่า EF (kgCO₂/ลิตร)", value=2.7446, format="%.4f")
     gwp_value = st.number_input("ค่า GWP", value=1.0)
 
-# --- ส่วนจัดการตารางข้อมูล ---
-st.subheader("📝 ตารางข้อมูลพิกัดจุดทิ้งขยะ (ไม่ต้องใส่ Depot ลงในตารางนี้)")
-df_input = pd.DataFrame(DEFAULT_DATA, columns=["Node_Name", "Latitude", "Longitude", "Demand"])
+# ----------------- MAIN AREA -----------------
+st.subheader("📝 1. ข้อมูลพิกัดจุดทิ้งขยะ (Customer Nodes)")
 
+# ⚠️ ย้ายกล่องอัปโหลดไฟล์พิกัดมาไว้ตรงกลางหน้าจอ เพื่อให้เห็นชัดเจน
+uploaded_coord_file = st.file_uploader("📂 อัปโหลดไฟล์ Excel/CSV (เพื่อนำเข้าพิกัดและปริมาณขยะแทนตารางด้านล่าง)", type=["xlsx", "csv"])
+
+if uploaded_coord_file is not None:
+    if uploaded_coord_file.name.endswith('.csv'):
+        df_input = pd.read_csv(uploaded_coord_file)
+    else:
+        df_input = pd.read_excel(uploaded_coord_file)
+    st.success("✅ โหลดข้อมูลจากไฟล์สำเร็จ!")
+else:
+    df_input = pd.DataFrame(DEFAULT_DATA, columns=["Node_Name", "Latitude", "Longitude", "Demand"])
+
+st.markdown("*(หมายเหตุ: ตารางนี้แสดงเฉพาะจุดเก็บขยะ **ไม่ต้องใส่พิกัด Depot** ลงในตารางนี้)*")
 edited_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True)
 
 if 'show_results' not in st.session_state:
     st.session_state['show_results'] = False
 
-start_btn = st.button("🚀 เริ่มการประมวลผล", type="primary")
+st.markdown("<br>", unsafe_allow_html=True)
+start_btn = st.button("🚀 ยืนยันข้อมูลและเริ่มจัดเส้นทาง", type="primary", use_container_width=True)
 
 if start_btn:
     cleaned_df = edited_df.dropna(subset=['Node_Name', 'Latitude', 'Longitude', 'Demand'])
@@ -312,20 +324,22 @@ if start_btn:
         st.error("❌ ข้อมูลไม่เพียงพอ ต้องมีจุดเก็บขยะอย่างน้อย 1 จุด")
         st.session_state['show_results'] = False
     elif routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)" and (G_osm is None or len(G_osm.edges) == 0):
-        st.error(f"❌ ไม่สามารถประมวลผลได้ เนื่องจากคุณยังไม่ได้อัปโหลดไฟล์ .osm หรือโครงข่ายถนนไม่สมบูรณ์")
+        st.error(f"❌ ไม่สามารถประมวลผลได้ เนื่องจากคุณยังไม่ได้อัปโหลดไฟล์แผนที่ .osm หรือโครงข่ายถนนไม่สมบูรณ์")
         st.session_state['show_results'] = False
     else:
         st.session_state['show_results'] = True
         st.session_state['process_data'] = cleaned_df
 
+st.markdown("---")
+
 # =====================================================================
-# 🚀 7. ส่วนประมวลผลหลัก
+# 🚀 7. ส่วนแสดงผลลัพธ์ (Interface สรุปผลแบบแยกส่วนชัดเจน)
 # =====================================================================
 if st.session_state.get('show_results', False):
     
     cleaned_df = st.session_state['process_data']
+    total_customers = len(cleaned_df) # นับจำนวนจุดทิ้งขยะทั้งหมด
     
-    # ⚠️ ประกอบร่างข้อมูล: เอา Depot จาก Sidebar มาต่อเข้าเป็นจุดแรกสุดของตาราง
     depot_data = [depot_name, depot_lat, depot_lon, 0.0]
     data_to_use = [depot_data] + cleaned_df.values.tolist()
     
@@ -333,7 +347,7 @@ if st.session_state.get('show_results', False):
     demands = dict(zip([row[0] for row in data_to_use], [row[3] for row in data_to_use]))
     osrm_input_format = [(row[0], row[1], row[2], row[3]) for row in data_to_use]
 
-    with st.spinner(f"📡 กำลังคำนวณระยะทางจาก {routing_mode}..."):
+    with st.spinner(f"📡 กำลังประมวลผลอัลกอริทึม {algorithm_choice}..."):
         if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)":
             df_dist = get_distance_matrix_osm(G_osm, osrm_input_format)
         else:
@@ -351,19 +365,30 @@ if st.session_state.get('show_results', False):
         carbon_emitted_E = activity_data_A * ef_value * gwp_value
         total_fuel_cost = activity_data_A * fuel_price
         
-        st.success(f"✅ ประมวลผลสำเร็จ!")
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("รอบวิ่ง (Trips)", f"{len(routes)} เที่ยว")
-        col2.metric("ระยะทางจริง", f"{grand_total_distance:.2f} กม.")
-        col3.metric("ปริมาตรขยะ", f"{sum(route_vols):.2f} ลบ.ม.")
-        col4.metric("คาร์บอน (CO₂e)", f"{carbon_emitted_E:.2f} kg")
-        col5.metric("ต้นทุนน้ำมัน", f"฿ {total_fuel_cost:,.2f}")
+        # ⚠️ สร้าง Dashboard Interface แยกออกมาแสดงผลโดยเฉพาะ
+        st.subheader("📊 2. สรุปผลการปฏิบัติงาน (Executive Dashboard)")
+        st.success("✅ วิเคราะห์และออกแบบเส้นทางเสร็จสมบูรณ์!")
         
-        with st.spinner("🗺️ กำลังเรนเดอร์แผนที่..."):
+        # แถวที่ 1 ของ Dashboard
+        c1, c2, c3 = st.columns(3)
+        c1.metric("📌 จำนวนจุดเก็บขยะทั้งหมด", f"{total_customers} จุด")
+        c2.metric("🚛 รอบรถที่ต้องวิ่ง (Trips)", f"{len(routes)} เที่ยว")
+        c3.metric("🗑️ ปริมาตรรวม", f"{sum(route_vols):.2f} ลบ.ม.")
+        
+        # แถวที่ 2 ของ Dashboard
+        c4, c5, c6 = st.columns(3)
+        c4.metric("📍 ระยะทางรวม", f"{grand_total_distance:.2f} กม.")
+        c5.metric("🌿 คาร์บอน (CO₂e)", f"{carbon_emitted_E:.2f} kg")
+        c6.metric("⛽ ต้นทุนน้ำมัน", f"฿ {total_fuel_cost:,.2f}")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("🗺️ 3. แผนที่จำลองการเดินรถ (Interactive GPS Map)")
+        with st.spinner("กำลังเรนเดอร์แผนที่..."):
             m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_osm)
             st_folium(m, width=1200, height=600, returned_objects=[])
             
-        st.markdown("### 📋 ตารางการปฏิบัติงานแยกตามยานพาหนะ")
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("📋 4. ตารางปฏิบัติงานของรถแต่ละคัน (Fleet Dispatch Schedule)")
         fleet_schedule = {f"🚛 รถขยะคันที่ {i+1}": [] for i in range(int(max_vehicles))}
         for i, r in enumerate(routes):
             fleet_schedule[f"🚛 รถขยะคันที่ {(i % int(max_vehicles)) + 1}"].append({"trip_sequence": (i // int(max_vehicles)) + 1, "route": r, "vol": route_vols[i]})
@@ -373,4 +398,4 @@ if st.session_state.get('show_results', False):
                 if not trips:
                     st.write("✅ รถคันนี้ไม่ได้ออกปฏิบัติงาน (Standby)")
                 for t in trips:
-                    st.info(f"📍 {nodes[0]} ➡️ {' ➡️ '.join(t['route'])} ➡️ {nodes[0]} (ขยะ: {t['vol']:.2f} ลบ.ม.)")
+                    st.info(f"📍 {nodes[0]} ➡️ {' ➡️ '.join(t['route'])} ➡️ {nodes[0]} (ปริมาตร: {t['vol']:.2f} ลบ.ม.)")
