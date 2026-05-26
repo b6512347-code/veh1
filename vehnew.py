@@ -616,7 +616,6 @@ with st.sidebar:
         "Sweep Algorithm (มาตรฐาน)",
     ))
     fuel_economy = st.number_input("อัตราสิ้นเปลือง (กม./ลิตร)", value=5.0)
-    fuel_price   = st.number_input("ราคาน้ำมัน (บาท/ลิตร)", value=32.94)
     ef_value     = st.number_input("ค่า EF (kgCO₂/ลิตร)", value=2.7446, format="%.4f")
     gwp_value    = st.number_input("ค่า GWP", value=1.0)
 
@@ -722,7 +721,6 @@ if st.session_state.get("show_results", False):
         grand_total = sum(route_distances)
         activity_A  = grand_total / fuel_economy
         carbon_E    = activity_A * ef_value * gwp_value
-        fuel_cost   = activity_A * fuel_price
 
         # Fleet Balancing
         trip_data = [{"original_idx": i+1, "route": routes[i],
@@ -746,10 +744,9 @@ if st.session_state.get("show_results", False):
         c2.metric("🚛 รอบที่ต้องวิ่ง",  f"{len(routes)} เที่ยว")
         c3.metric("🗑️ ปริมาตรรวม",     f"{sum(route_vols):.2f} ลบ.ม.")
 
-        c4, c5, c6 = st.columns(3)
+        c4, c5 = st.columns(2)
         c4.metric("📍 ระยะทางรวม",      f"{grand_total:.2f} กม.")
         c5.metric("🌿 คาร์บอน (CO₂e)",  f"{carbon_E:.2f} kg")
-        c6.metric("⛽ ต้นทุนน้ำมัน",    f"฿ {fuel_cost:,.2f}")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.subheader("🗺️ 3. แผนที่จำลองการเดินรถ")
