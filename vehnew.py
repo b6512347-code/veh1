@@ -313,6 +313,39 @@ def get_distance_matrix_osrm(locations):
 # =====================================================================
 # 5. อัลกอริทึม
 # =====================================================================
+# =====================================================================
+# Sequential Route (เส้นทางเดิมตามลำดับข้อมูล)
+# =====================================================================
+def run_sequential_algorithm(locations, demands, nodes, max_capacity):
+    """
+    Sequential Route — เก็บขยะตามลำดับในข้อมูลดั้งเดิม
+    เมื่อ load + demand > max_capacity → วิ่งกลับ Depot แล้วเริ่ม Route ใหม่
+    """
+    routes, route_vols   = [], []
+    current_route, current_vol = [], 0.0
+
+    for item in locations[1:]:          # ข้าม Depot (index 0)
+        name   = item[0]
+        demand = demands[name]
+
+        if current_vol + demand > max_capacity:
+            if current_route:
+                routes.append(current_route)
+                route_vols.append(current_vol)
+            current_route = [name]
+            current_vol   = demand
+        else:
+            current_route.append(name)
+            current_vol  += demand
+
+    if current_route:
+        routes.append(current_route)
+        route_vols.append(current_vol)
+
+    return routes, route_vols
+
+
+
 def run_savings_algorithm(df_dist, demands, nodes, max_capacity):
     depot, customers = nodes[0], nodes[1:]
     savings = []
@@ -614,6 +647,7 @@ with st.sidebar:
         "Balanced Workload Sweep",
         "Clarke-Wright Savings (มาตรฐาน)",
         "Sweep Algorithm (มาตรฐาน)",
+        "Sequential Route (เส้นทางเดิมตามลำดับ)",
     ))
     fuel_economy = st.number_input("อัตราสิ้นเปลือง (กม./ลิตร)", value=5.0)
     ef_value     = st.number_input("ค่า EF (kgCO₂/ลิตร)", value=2.70757, format="%.5f")
@@ -708,6 +742,9 @@ if st.session_state.get("show_results", False):
         elif algorithm_choice == "Balanced Workload Sweep":
             routes, route_vols = run_balanced_sweep_algorithm(
                 osrm_fmt, demands, nodes, max_capacity, df_dist)
+        elif algorithm_choice == "Sequential Route (เส้นทางเดิมตามลำดับ)":
+            routes, route_vols = run_sequential_algorithm(
+                osrm_fmt, demands, nodes, max_capacity)
         else:
             routes, route_vols = run_sweep_algorithm(
                 osrm_fmt, demands, nodes, max_capacity, df_dist)
