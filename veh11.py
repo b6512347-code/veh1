@@ -528,3 +528,46 @@ if st.session_state.get('show_results', False):
                     st.write("✅ รถคันนี้ไม่ได้ออกปฏิบัติงาน (Standby)")
                 for t in trips:
                     st.info(f"📍 {nodes[0]} ➡️ {' ➡️ '.join(t['route'])} ➡️ {nodes[0]} \n\n(ปริมาตร: {t['vol']:.2f} ลบ.ม. | ระยะทางรอบ: {t['dist']:.2f} กม.)")
+# ... (โค้ดช่วงบนคงเดิม) ...
+
+# ----------------- MAIN AREA -----------------
+st.subheader("📝 1. ข้อมูลพิกัดจุดทิ้งขยะ (Customer Nodes)")
+
+# ... (ช่วงอัปโหลดไฟล์ และตาราง edited_df คงเดิม) ...
+
+if start_btn:
+    # ... (ส่วนประมวลผล start_btn คงเดิม) ...
+
+# =====================================================================
+# 🚀 7. ส่วนแสดงผลลัพธ์ (Interface สรุปผลแบบแยกส่วน)
+# =====================================================================
+if st.session_state.get('show_results', False):
+    
+    # ... (ส่วนคำนวณอัลกอริทึมและ Dashboard สรุปผล คงเดิม) ...
+    
+    # ---------------------------------------------------------
+    # 🗺️ 3. แผนที่จำลองการเดินรถ (Interactive GPS Map)
+    # ---------------------------------------------------------
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.subheader("🗺️ 3. แผนที่จำลองการเดินรถ (Interactive GPS Map)")
+    
+    # ⚠️ ย้ายตัวเลือกประเภทแผนที่ มาไว้ตรงนี้ (เหนือแผนที่)
+    map_type = st.selectbox(
+        "เลือกประเภทของแผนที่แสดงผล:",
+        (
+            "แผนที่ภูมิประเทศ (OpenStreetMap)",
+            "แผนที่ดาวเทียม (Esri Satellite)",
+            "แผนที่พื้นฐานแบบสว่าง (CartoDB Positron)",
+            "แผนที่พื้นฐานแบบมืด (CartoDB Dark_Matter)",
+            "แผนที่ภูมิประเทศ+ดาวเทียม (Esri NatGeo)"
+        ),
+        key="map_selector" # ใส่ key เพื่อให้ Streamlit จำสถานะการเลือกได้
+    )
+    
+    with st.spinner("กำลังเรนเดอร์แผนที่..."):
+        # ⚠️ ส่ง map_type ที่เลือกจากselectbox ด้านบนเข้าไป
+        m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_osm, map_type)
+        st_folium(m, width=1200, height=600, returned_objects=[])
+        
+    st.markdown("<br>", unsafe_allow_html=True)
+    # ... (ตารางปฏิบัติงานและส่วนล่างคงเดิม) ...
