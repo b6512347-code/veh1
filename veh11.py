@@ -528,46 +528,99 @@ if st.session_state.get('show_results', False):
                     st.write("✅ รถคันนี้ไม่ได้ออกปฏิบัติงาน (Standby)")
                 for t in trips:
                     st.info(f"📍 {nodes[0]} ➡️ {' ➡️ '.join(t['route'])} ➡️ {nodes[0]} \n\n(ปริมาตร: {t['vol']:.2f} ลบ.ม. | ระยะทางรอบ: {t['dist']:.2f} กม.)")
-# ... (โค้ดช่วงบนคงเดิม) ...
+# ... (โค้ดด้านบนทั้งหมดคงเดิม) ...
 
 # ----------------- MAIN AREA -----------------
-st.subheader("📝 1. ข้อมูลพิกัดจุดทิ้งขยะ (Customer Nodes)")
+# ... (ส่วนตารางและปุ่ม start_btn คงเดิม) ...
 
-# ... (ช่วงอัปโหลดไฟล์ และตาราง edited_df คงเดิม) ...
-
+# ⚠️ ให้เช็คว่าบรรทัดนี้อยู่ชิดซ้ายสุด (ไม่มีเว้นวรรค)
 if start_btn:
-    # ... (ส่วนประมวลผล start_btn คงเดิม) ...
+    cleaned_df = edited_df.dropna(subset=['Node_Name', 'Latitude', 'Longitude', 'Demand'])
+    
+    if len(cleaned_df) < 1:
+        st.error("❌ ข้อมูลไม่เพียงพอ ต้องมีจุดเก็บขยะอย่างน้อย 1 จุด")
+        st.session_state['show_results'] = False
+    elif routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)" and (G_osm is None or len(G_osm.edges) == 0):
+        st.error(f"❌ ไม่สามารถประมวลผลได้ เนื่องจากคุณยังไม่ได้อัปโหลดไฟล์แผนที่ .osm หรือโครงข่ายถนนไม่สมบูรณ์")
+        st.session_state['show_results'] = False
+    else:
+        st.session_state['show_results'] = True
+        st.session_state['process_data'] = cleaned_df
+
+st.markdown("---")
 
 # =====================================================================
-# 🚀 7. ส่วนแสดงผลลัพธ์ (Interface สรุปผลแบบแยกส่วน)
+# 🚀 7. ส่วนแสดงผลลัพธ์ (ให้มั่นใจว่า if ตัวนี้ชิดซ้ายสุด)
 # =====================================================================
 if st.session_state.get('show_results', False):
     
-    # ... (ส่วนคำนวณอัลกอริทึมและ Dashboard สรุปผล คงเดิม) ...
+    cleaned_df = st.session_state['process_data']
+    total_customers = len(cleaned_df)
     
-    # ---------------------------------------------------------
-    # 🗺️ 3. แผนที่จำลองการเดินรถ (Interactive GPS Map)
-    # ---------------------------------------------------------
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.subheader("🗺️ 3. แผนที่จำลองการเดินรถ (Interactive GPS Map)")
+    depot_data = [depot_name, depot_lat, depot_lon, 0.0]
+    data_to_use = [depot_data] + cleaned_df.values.tolist()
     
-    # ⚠️ ย้ายตัวเลือกประเภทแผนที่ มาไว้ตรงนี้ (เหนือแผนที่)
-    map_type = st.selectbox(
-        "เลือกประเภทของแผนที่แสดงผล:",
-        (
-            "แผนที่ภูมิประเทศ (OpenStreetMap)",
-            "แผนที่ดาวเทียม (Esri Satellite)",
-            "แผนที่พื้นฐานแบบสว่าง (CartoDB Positron)",
-            "แผนที่พื้นฐานแบบมืด (CartoDB Dark_Matter)",
-            "แผนที่ภูมิประเทศ+ดาวเทียม (Esri NatGeo)"
-        ),
-        key="map_selector" # ใส่ key เพื่อให้ Streamlit จำสถานะการเลือกได้
-    )
-    
-    with st.spinner("กำลังเรนเดอร์แผนที่..."):
-        # ⚠️ ส่ง map_type ที่เลือกจากselectbox ด้านบนเข้าไป
-        m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_osm, map_type)
-        st_folium(m, width=1200, height=600, returned_objects=[])
+    nodes = [row[0] for row in data_to_use]
+    demands = dict(zip([row[0] for row in data_to_use], [row[3] for row in data_to_use]))
+    osrm_input_format = [(row[0], row[1], row[2], row[3]) for row in data_to_use]
+
+    with st.spinner(f"📡 กำลังประมวลผลด้วยอัลกอริทึม {algorithm_choice}..."):
+        if routing_mode == "Local Map (ออฟไลน์ผ่านไฟล์ .osm)":
+            df_dist = get_distance_matrix_osm(G_osm, osrm_input_format)
+        else:
+            df_dist = get_distance_matrix_osrm(osrm_input_format)
+            
+        df_dist.columns = df_dist.index = nodes
         
-    st.markdown("<br>", unsafe_allow_html=True)
-    # ... (ตารางปฏิบัติงานและส่วนล่างคงเดิม) ...
+        if algorithm_choice == "Clarke-Wright Savings (มาตรฐาน)":
+            routes, route_vols = run_savings_algorithm(df_dist, demands, nodes, max_capacity)
+        elif algorithm_choice == "Balanced Clarke-Wright Savings (แนะนำ)":
+            routes, route_vols = run_balanced_savings_algorithm(df_dist, demands, nodes, max_capacity, max_vehicles)
+        elif algorithm_choice == "Balanced Workload Sweep":
+            routes, route_vols = run_balanced_sweep_algorithm(osrm_input_format, demands, nodes, max_capacity)
+        else:
+            routes, route_vols = run_sweep_algorithm(osrm_input_format, demands, nodes, max_capacity)
+
+        route_distances = []
+        for r in routes:
+            full_route = [nodes[0]] + r + [nodes[0]]
+            dist = sum([df_dist.loc[full_route[k], full_route[k+1]] for k in range(len(full_route)-1)])
+            route_distances.append(dist)
+            
+        grand_total_distance = sum(route_distances)
+        activity_data_A = grand_total_distance / fuel_economy
+        carbon_emitted_E = activity_data_A * ef_value * gwp_value
+        total_fuel_cost = activity_data_A * fuel_price
+        
+        trip_data = [{"original_idx": i+1, "route": routes[i], "vol": route_vols[i], "dist": route_distances[i]} for i in range(len(routes))]
+        trip_data.sort(key=lambda x: x['dist'], reverse=True)
+        
+        fleet_schedule = {f"🚛 รถขยะคันที่ {i+1}": [] for i in range(int(max_vehicles))}
+        vehicle_workloads = {f"🚛 รถขยะคันที่ {i+1}": 0.0 for i in range(int(max_vehicles))}
+        
+        for t in trip_data:
+            best_vehicle = min(vehicle_workloads, key=vehicle_workloads.get)
+            t['trip_sequence'] = len(fleet_schedule[best_vehicle]) + 1
+            fleet_schedule[best_vehicle].append(t)
+            vehicle_workloads[best_vehicle] += t['dist']
+
+        st.subheader("📊 2. สรุปผลการปฏิบัติงาน (Executive Dashboard)")
+        st.success("✅ วิเคราะห์และออกแบบเส้นทางเสร็จสมบูรณ์!")
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("📌 จำนวนจุดเก็บขยะทั้งหมด", f"{total_customers} จุด")
+        c2.metric("🚛 รอบรถที่ต้องวิ่ง (Trips)", f"{len(routes)} เที่ยว")
+        c3.metric("🗑️ ปริมาตรรวม", f"{sum(route_vols):.2f} ลบ.ม.")
+        
+        c4, c5, c6 = st.columns(3)
+        c4.metric("📍 ระยะทางรวม", f"{grand_total_distance:.2f} กม.")
+        c5.metric("🌿 คาร์บอน (CO₂e)", f"{carbon_emitted_E:.2f} kg")
+        c6.metric("⛽ ต้นทุนน้ำมัน", f"฿ {total_fuel_cost:,.2f}")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("🗺️ 3. แผนที่จำลองการเดินรถ (Interactive GPS Map)")
+        map_type = st.selectbox("เลือกประเภทของแผนที่:", [...]) # ใส่รายการเดิมของคุณที่นี่
+        
+        with st.spinner("กำลังเรนเดอร์แผนที่..."):
+            m = create_interactive_map(routes, osrm_input_format, nodes, routing_mode, G_osm, map_type)
+            st_folium(m, width=1200, height=600, returned_objects=[])
