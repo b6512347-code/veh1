@@ -313,9 +313,6 @@ def get_distance_matrix_osrm(locations):
 # =====================================================================
 # 5. อัลกอริทึม
 # =====================================================================
-# =====================================================================
-# Sequential Route (เส้นทางเดิมตามลำดับข้อมูล)
-# =====================================================================
 def run_sequential_algorithm(locations, demands, nodes, max_capacity):
     """
     Sequential Route — เก็บขยะตามลำดับในข้อมูลดั้งเดิม
@@ -343,7 +340,6 @@ def run_sequential_algorithm(locations, demands, nodes, max_capacity):
         route_vols.append(current_vol)
 
     return routes, route_vols
-
 
 
 def run_savings_algorithm(df_dist, demands, nodes, max_capacity):
@@ -649,7 +645,8 @@ with st.sidebar:
         "Sweep Algorithm (มาตรฐาน)",
         "Sequential Route (เส้นทางเดิมตามลำดับ)",
     ))
-    fuel_economy = st.number_input("อัตราสิ้นเปลือง (กม./ลิตร)", value=5.0)
+    # *** แก้ไข: เปลี่ยนค่าเริ่มต้นอัตราสิ้นเปลืองจาก 5.0 → 11.111 ***
+    fuel_economy = st.number_input("อัตราสิ้นเปลือง (กม./ลิตร)", value=11.111, format="%.3f")
     ef_value     = st.number_input("ค่า EF (kgCO₂/ลิตร)", value=2.70757, format="%.5f")
     gwp_value    = st.number_input("ค่า GWP", value=1.0)
 
